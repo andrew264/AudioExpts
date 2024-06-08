@@ -1,6 +1,111 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import lightning as L
+
+from .melspec import MelSpectrogram
+
+
+class PeriodDiscriminator(nn.Module):
+    def __init__(self, period):
+        super(PeriodDiscriminator, self).__init__()
+        self.period = period
+        self.convs = nn.ModuleList([
+            nn.Conv2d(1, 32, (5, 1), (3, 1), padding=(2, 0)),
+            nn.Conv2d(32, 128, (5, 1), (3, 1), padding=(2, 0)),
+            nn.Conv2d(128, 512, (5, 1), (3, 1), padding=(2, 0)),
+            nn.Conv2d(512, 1024, (5, 1), (3, 1), padding=(2, 0)),
+            nn.Conv2d(1024, 1024, (5, 1), (3, 1), padding=(2, 0)),
+        ])
+        self.conv_post = nn.Conv2d(1024, 1, (3, 1), 1, padding=(1, 0))
+
+    def forward(self, x):
+        fmap = []
+        b, c, t = x.shape
+        if t % self.period != 0:
+            n_pad = self.period - (t % self.period)
+            x = F.pad(x, (0, n_pad), "reflect")
+        x = x.view(b, c, x.size(2) // self.period, self.period)
+
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), 0.1)
+            fmap.append(x)
+        x = self.conv_post(x)
+        fmap.append(x)
+
+        return x.view(b, -1), fmap
+
+
+class MultiPeriodDiscriminator(nn.Module):
+    def __init__(self, periods=None):
+        super(MultiPeriodDiscriminator, self).__init__()
+        if periods is None:
+            periods = [2, 3, 5, 7, 11]
+        self.discriminators = nn.ModuleList([PeriodDiscriminator(p) for p in periods])
+
+    def forward(self, y, y_hat):
+        y_d_rs = []
+        y_d_gs = []
+        fmap_rs = []
+        fmap_gs = []
+        for i, d in enumerate(self.discriminators):
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            fmap_rs.append(fmap_r)
+            y_d_gs.append(y_d_g)
+            fmap_gs.append(fmap_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
+class ScaleDiscriminator(nn.Module):
+    def __init__(self):
+        super(ScaleDiscriminator, self).__init__()
+        self.convs = nn.ModuleList([
+            nn.Conv1d(1, 128, 15, 1, padding=7),
+            nn.Conv1d(128, 128, 41, 2, groups=4, padding=20),
+            nn.Conv1d(128, 256, 41, 2, groups=16, padding=20),
+            nn.Conv1d(256, 512, 41, 4, groups=16, padding=20),
+            nn.Conv1d(512, 1024, 41, 4, groups=16, padding=20),
+            nn.Conv1d(1024, 1024, 41, 1, groups=16, padding=20),
+            nn.Conv1d(1024, 1024, 5, 1, padding=2),
+        ])
+        self.conv_post = nn.Conv1d(1024, 1, 3, 1, padding=1)
+
+    def forward(self, x):
+        fmap = []
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), 0.1)
+            fmap.append(x)
+        x = self.conv_post(x)
+        fmap.append(x)
+        return x, fmap
+
+
+class MultiScaleDiscriminator(nn.Module):
+    def __init__(self):
+        super(MultiScaleDiscriminator, self).__init__()
+        self.discriminators = nn.ModuleList([ScaleDiscriminator() for _ in range(3)])
+        self.meanpools = nn.ModuleList([nn.AvgPool1d(4, 2, padding=2) for _ in range(2)])
+
+    def forward(self, y, y_hat):
+        y_d_rs = []
+        y_d_gs = []
+        fmap_rs = []
+        fmap_gs = []
+        for i, d in enumerate(self.discriminators):
+            if i != 0:
+                y = self.meanpools[i - 1](y)
+                y_hat = self.meanpools[i - 1](y_hat)
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
 class ResidualBlock(nn.Module):
@@ -36,7 +141,7 @@ class HiFiGANGenerator(nn.Module):
         self.resblock_kernel_sizes = [3, 7, 11] if resblock_kernel_sizes is None else resblock_kernel_sizes
         self.num_kernel = len(self.resblock_kernel_sizes)
 
-        self.resblock_dilation_sizes = [[1, 3, 5], [1, 3, 5], [1, 3, 5]]\
+        self.resblock_dilation_sizes = [[1, 3, 5], [1, 3, 5], [1, 3, 5]] \
             if resblock_dilation_sizes is None else resblock_dilation_sizes
 
         self.conv_pre = nn.Conv1d(in_channels, upsample_initial_channel, 7, 1, padding=3)
@@ -79,3 +184,100 @@ class HiFiGANGenerator(nn.Module):
         x = self.conv_post(x)
         x = torch.tanh(x)
         return x
+
+
+class HiFiGAN(L.LightningModule):
+    def __init__(self, training: bool = True):
+        super().__init__()
+        if training:
+            self.period_discriminator = MultiPeriodDiscriminator()
+            self.scale_discriminator = MultiScaleDiscriminator()
+            self.melspec = MelSpectrogram()
+        self.generator = HiFiGANGenerator()
+        self.lr = 2e-4
+        self.automatic_optimization = False
+
+    def forward(self, x):
+        return self.generator(x)
+
+    @staticmethod
+    def discriminator_loss(disc_real_outputs, disc_generated_outputs):
+        loss = torch.tensor(0., device=disc_real_outputs[0].device)
+        r_losses = []
+        g_losses = []
+        for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
+            r_loss = torch.mean((1 - dr) ** 2)
+            g_loss = torch.mean(dg ** 2)
+            loss = loss + (r_loss + g_loss)
+            r_losses.append(r_loss.item())
+            g_losses.append(g_loss.item())
+
+        return loss, r_losses, g_losses
+
+    @staticmethod
+    def feature_loss(fmap_r, fmap_g):
+        loss = 0.
+        for dr, dg in zip(fmap_r, fmap_g):
+            for rl, gl in zip(dr, dg):
+                loss += F.l1_loss(gl, rl)
+        return loss * 2
+
+    @staticmethod
+    def generator_loss(disc_outputs):
+        loss = 0.
+        gen_losses = []
+        for dg in disc_outputs:
+            l = torch.mean((1 - dg) ** 2)
+            gen_losses.append(l)
+            loss += l
+
+        return loss, gen_losses
+
+    def training_step(self, batch, batch_idx):
+        mels, wavs = batch
+        wavs = wavs.unsqueeze(1)
+
+        opt_g, opt_d = self.optimizers()
+
+        # Discriminator step
+        opt_d.zero_grad()
+        y_g_hat = self(mels)
+        y_g_hat_mel = self.melspec(y_g_hat.squeeze(1))
+
+        # Period discriminator
+        y_df_hat_r, y_df_hat_g, _, _ = self.period_discriminator(wavs, y_g_hat.detach())
+        loss_disc_f, losses_disc_f_r, losses_disc_f_g = self.discriminator_loss(y_df_hat_r, y_df_hat_g)
+
+        # Scale discriminator
+        y_ds_hat_r, y_ds_hat_g, _, _ = self.scale_discriminator(wavs, y_g_hat.detach())
+        loss_disc_s, losses_disc_s_r, losses_disc_s_g = self.discriminator_loss(y_ds_hat_r, y_ds_hat_g)
+        loss_disc_all = loss_disc_s + loss_disc_f
+
+        loss_disc_all.backward()
+        opt_d.step()
+        self.log('train_loss_d', loss_disc_all, on_step=True, on_epoch=True, prog_bar=True)
+
+        # Generator step
+        opt_g.zero_grad()
+        loss_mel = F.l1_loss(mels, y_g_hat_mel) * 45
+
+        y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = self.period_discriminator(wavs, y_g_hat)
+        y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = self.scale_discriminator(wavs, y_g_hat)
+        loss_fm_f = self.feature_loss(fmap_f_r, fmap_f_g)
+        loss_fm_s = self.feature_loss(fmap_s_r, fmap_s_g)
+        loss_gen_f, losses_gen_f = self.generator_loss(y_df_hat_g)
+        loss_gen_s, losses_gen_s = self.generator_loss(y_ds_hat_g)
+        loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
+
+        loss_gen_all.backward()
+        opt_g.step()
+
+        self.log('train_loss_g', loss_gen_all, on_step=True, on_epoch=True, prog_bar=True)
+
+    def configure_optimizers(self):
+        opt_g = torch.optim.AdamW(self.generator.parameters(), lr=self.lr, betas=(0.8, 0.99))
+        opt_d = torch.optim.AdamW(
+            list(self.period_discriminator.parameters()) + list(self.scale_discriminator.parameters()),
+            lr=self.lr, betas=(0.8, 0.99)
+        )
+        return [opt_g, opt_d]
