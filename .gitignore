@@ -1,0 +1,6 @@
+/lightning_logs
+
+*.pth
+*.pyc
+
+/.idea
