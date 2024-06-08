@@ -19,15 +19,17 @@ class MelSpectrogram(object):
         self.fmin = 0.
         self.fmax = 8000.
 
-    def mel_spectrogram(self, y, center=False):
+    def mel_spectrogram(self, y, sr=None, center=False):
         if torch.min(y) < -1.:
             print('min value is ', torch.min(y))
         if torch.max(y) > 1.:
             print('max value is ', torch.max(y))
+        if sr is None:
+            sr = self.sampling_rate
 
         fmax_key = f'{self.fmax}_{y.device}'
         if fmax_key not in self.mel_basis:
-            mel = librosa_mel_fn(sr=self.sampling_rate, n_fft=self.n_fft, n_mels=self.num_mels,
+            mel = librosa_mel_fn(sr=sr, n_fft=self.n_fft, n_mels=self.num_mels,
                                  fmin=self.fmin, fmax=self.fmax)
             self.mel_basis[fmax_key] = torch.from_numpy(mel).float().to(y.device)
             self.hann_window[str(y.device)] = torch.hann_window(self.win_size).to(y.device)
@@ -47,8 +49,8 @@ class MelSpectrogram(object):
         spec = dynamic_range_compression(spec)  # spectral normalize
         return spec
 
-    def __call__(self, x):
+    def __call__(self, x, sr=None):
         out_dtype = x.dtype
         if x.dtype != torch.float32:
             x = x.to(dtype=torch.float32)
-        return self.mel_spectrogram(x).to(dtype=out_dtype)
+        return self.mel_spectrogram(x, sr).to(dtype=out_dtype)
