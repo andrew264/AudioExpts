@@ -1,7 +1,9 @@
 /lightning_logs
 /data
+/weights
 
 *.pth
 *.pyc
 
 /.idea
+/.run

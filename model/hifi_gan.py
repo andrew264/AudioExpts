@@ -1,7 +1,7 @@
+import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import lightning as L
 
 from .melspec import MelSpectrogram
 
@@ -184,6 +184,38 @@ class HiFiGANGenerator(nn.Module):
         x = self.conv_post(x)
         x = torch.tanh(x)
         return x
+
+
+class Denoiser(nn.Module):
+    def __init__(self, hifigan, filter_length=1024, hop_size=256, win_length=1024):
+        super(Denoiser, self).__init__()
+        self.filter_length = filter_length
+        self.hop_size = hop_size
+        self.win_length = win_length
+        self.window = torch.hann_window(self.win_length)
+        self.register_buffer('bias_spec', self.compute_bias_spec(hifigan), persistent=False)
+
+    def compute_bias_spec(self, hifigan):
+        with torch.no_grad():
+            mel_input = torch.zeros(1, 80, 100)
+            bias_audio = hifigan(mel_input).float().squeeze()
+            bias_spec = torch.stft(bias_audio, self.filter_length, self.hop_size, self.win_length,
+                                   window=self.window, return_complex=True)[:, 0][:, None]
+        return bias_spec
+
+    def forward(self, audio, strength=0.05):
+        if isinstance(audio, np.ndarray):
+            audio = torch.from_numpy(audio)
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)
+
+        audio_stft = torch.stft(audio, self.filter_length, self.hop_size, self.win_length,
+                                window=self.window, return_complex=True)
+
+        audio_spec_denoised = audio_stft - self.bias_spec * strength
+        audio_denoised = torch.istft(audio_spec_denoised, self.filter_length, self.hop_size,
+                                     self.win_length, window=self.window, return_complex=False)
+        return audio_denoised
 
 
 class HiFiGAN(L.LightningModule):

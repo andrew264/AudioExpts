@@ -8,11 +8,11 @@ def dynamic_range_compression(x, C=1, clip_val=1e-5):
 
 
 class MelSpectrogram(object):
-    def __init__(self, ):
+    def __init__(self, n_mels=80):
         self.mel_basis = {}
         self.hann_window = {}
         self.n_fft = 1024
-        self.num_mels = 80
+        self.num_mels = n_mels
         self.sampling_rate = 16000
         self.hop_size = 256
         self.win_size = 1024

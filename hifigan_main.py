@@ -48,10 +48,9 @@ def dataloader():
 
 
 if __name__ == '__main__':
-    torch.autograd.set_detect_anomaly(True)
     model = get_model()
-    if os.path.exists("generator.pth"):
-        model.generator.load_state_dict(torch.load("generator.pth"))
+    if os.path.exists("weights/generator.pth"):
+        model.generator.load_state_dict(torch.load("weights/generator.pth"))
 
     print(model)
 
@@ -59,4 +58,4 @@ if __name__ == '__main__':
 
     trainer = L.Trainer(precision="bf16-true", max_epochs=3)
     trainer.fit(model, dl)
-    torch.save(model.generator.state_dict(), "generator.pth")
+    torch.save(model.generator.state_dict(), "weights/generator.pth")
