@@ -16,7 +16,7 @@ class LibreSpeechDataset(Dataset):
         super().__init__()
         self._data = load_dataset("/home/andrew264/datasets/librispeech_asr", "clean",
                                   split=split, streaming=streaming, trust_remote_code=True)
-        self.seqment_size = 16384
+        self.seqment_size = 32000
 
     def __len__(self):
         return len(self._data)
@@ -49,8 +49,8 @@ def dataloader():
 
 if __name__ == '__main__':
     model = get_model()
-    if os.path.exists("weights/generator.pth"):
-        model.generator.load_state_dict(torch.load("weights/generator.pth"))
+    if os.path.exists("weights/hifi_gan.pth"):
+        model.generator.load_state_dict(torch.load("weights/hifi_gan.pth"))
 
     print(model)
 
@@ -58,4 +58,4 @@ if __name__ == '__main__':
 
     trainer = L.Trainer(precision="bf16-true", max_epochs=3)
     trainer.fit(model, dl)
-    torch.save(model.generator.state_dict(), "weights/generator.pth")
+    torch.save(model.generator.state_dict(), "weights/hifi_gan.pth")
