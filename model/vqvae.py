@@ -20,7 +20,7 @@ class ResBlock(nn.Module):
 
 
 class VQVAEEncoder(nn.Module):
-    def __init__(self, input_dim=(3, 64, 64), latent_dim=16):
+    def __init__(self, input_dim=(3, 256, 256), latent_dim=16):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
@@ -28,14 +28,19 @@ class VQVAEEncoder(nn.Module):
 
         self.layers = nn.Sequential(
             nn.Conv2d(self.num_channels, 64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
-            ResBlock(128, 32),
-            ResBlock(128, 32)
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            ResBlock(256, 64),
+            ResBlock(256, 64)
         )
 
-        self.pre_quantized = nn.Conv2d(128, self.latent_dim, kernel_size=1, stride=1)
+        self.pre_quantized = nn.Conv2d(256, self.latent_dim, kernel_size=1, stride=1)
 
     def forward(self, x):
         x = self.layers(x)
@@ -145,19 +150,22 @@ class Quantizer(nn.Module):
 
 
 class VQVAEDecoder(nn.Module):
-    def __init__(self, latent_dim=16, output_dim=(3, 64, 64)):
+    def __init__(self, latent_dim=16, output_dim=(3, 256, 256)):
         super().__init__()
         self.latent_dim = latent_dim
         self.output_dim = output_dim
         self.num_channels = output_dim[0]
 
         self.layers = nn.Sequential(
-            nn.ConvTranspose2d(self.latent_dim, 128, kernel_size=1, stride=1),
-            nn.ConvTranspose2d(128, 128, kernel_size=3, stride=2, padding=1),
-            ResBlock(128, 32),
-            ResBlock(128, 32),
-            nn.ConvTranspose2d(128, 128, kernel_size=5, stride=2, padding=1),
-            nn.ConvTranspose2d(128, 64, kernel_size=5, stride=2, padding=1, output_padding=1),
+            nn.ConvTranspose2d(self.latent_dim, 256, kernel_size=1, stride=1),
+            ResBlock(256, 64),
+            ResBlock(256, 64),
+            nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
             nn.ConvTranspose2d(64, self.num_channels, kernel_size=4, stride=2, padding=1),
             nn.Sigmoid()
         )
@@ -168,7 +176,7 @@ class VQVAEDecoder(nn.Module):
 
 class VQVAE(L.LightningModule):
     # https://github.com/clementchadebec/benchmark_VAE/blob/main/src/pythae/models/vq_vae/vq_vae_model.py
-    def __init__(self, input_dim=(3, 64, 64), latent_dim=16, num_embeddings=128, commitment_loss_factor=0.25,
+    def __init__(self, input_dim=(3, 256, 256), latent_dim=16, num_embeddings=128, commitment_loss_factor=0.25,
                  use_ema=False, quantization_loss_factor=1.0, decay=0.99):
         super().__init__()
         self.save_hyperparameters()
