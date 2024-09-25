@@ -1,2 +1,2 @@
 from .hifi_gan import HiFiGAN
-from .melspec import MelSpectrogram, MelSpectrogram2, Spectrogram
+from .processors.melspec import MelSpectrogram, MelSpectrogram2, Spectrogram

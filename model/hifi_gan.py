@@ -1,14 +1,19 @@
-from typing import Tuple, List
+from math import prod
+from typing import Callable, Tuple, List
+from functools import partial
 
 import lightning as L
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm
+from torch.utils.checkpoint import checkpoint
+from torch.nn.utils.parametrizations import weight_norm
+from torch import Tensor
 
-from .melspec import MelSpectrogram
-
+from model.processors.melspec import MelSpectrogram
+from model.layers.resblock import ParallelResBlock
+from model.layers.conv1d import Conv1DNet, TransConv1DNet, init_weights
 
 class PeriodDiscriminator(nn.Module):
     def __init__(self, period: int,
@@ -115,98 +120,47 @@ class MultiScaleDiscriminator(nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
-class ResidualBlock(nn.Module):
-    def __init__(self, channels, kernel_size, dilation):
-        super(ResidualBlock, self).__init__()
-        self.convs1 = nn.ModuleList([
-            weight_norm(nn.Conv1d(channels, channels, kernel_size, 1, dilation=d, padding=(kernel_size - 1) // 2 * d))
-            for d in dilation
-        ])
-        self.convs2 = nn.ModuleList([
-            weight_norm(nn.Conv1d(channels, channels, kernel_size, 1, padding=(kernel_size - 1) // 2))
-            for _ in dilation
-        ])
-
-    def forward(self, x):
-        for conv1, conv2 in zip(self.convs1, self.convs2):
-            xt = conv1(F.leaky_relu(x, 0.1))
-            xt = conv2(F.leaky_relu(xt, 0.1))
-            x = x + xt
-        return x
-
-
-class ResidualBlock2(nn.Module):
-    def __init__(self, channels, kernel_size, dilation):
-        super(ResidualBlock2, self).__init__()
-        self.convs = nn.ModuleList([
-            weight_norm(nn.Conv1d(channels, channels, kernel_size, 1, dilation=d, padding=(kernel_size - 1) // 2 * d))
-            for d in dilation
-        ])
-
-    def forward(self, x):
-        for conv in self.convs:
-            xt = conv(F.leaky_relu(x, 0.1))
-            x = x + xt
-        return x
-
-
 class HiFiGANGenerator(nn.Module):
-    def __init__(self, in_channels=80, upsample_rates=(8, 8, 2, 2), upsample_kernel_sizes=(16, 16, 4, 4),
-                 resblock_kernel_sizes=(3, 7, 11), resblock_dilation_sizes=((1, 3, 5), (1, 3, 5), (1, 3, 5))):
+    def __init__(
+            self, hop_length: int = 512, num_mels: int = 128,
+            upsample_rates: tuple[int] = (8, 8, 2, 2, 2), upsample_kernel_sizes: tuple[int] = (16, 16, 8, 2, 2),
+            resblock_kernel_sizes: tuple[int] = (3, 7, 11), resblock_dilation_sizes: tuple[tuple[int]] = ((1, 3, 5), (1, 3, 5), (1, 3, 5)),
+            upsample_initial_channel: int = 512, pre_conv_kernel_size: int = 7,
+            post_conv_kernel_size: int = 7, activation: Callable[[Tensor], Tensor]=partial(F.silu, inplace=True)):
         super(HiFiGANGenerator, self).__init__()
 
-        upsample_initial_channel = 512
+        assert (prod(upsample_rates)==hop_length), f"hop_length must be {prod(upsample_rates)}"
+        self.conv_pre = Conv1DNet(num_mels, upsample_initial_channel, pre_conv_kernel_size, stride=1).weight_norm()
+        self.num_upsamples = len(upsample_rates)
+        self.num_kernels = len(resblock_kernel_sizes)
 
-        self.upsample_rates = upsample_rates
-        self.upsample_kernel_sizes = upsample_kernel_sizes
-        self.resblock_kernel_sizes = resblock_kernel_sizes
-        self.num_kernel = len(self.resblock_kernel_sizes)
-        self.resblock_dilation_sizes = resblock_dilation_sizes
+        self.ups = nn.ModuleList([
+            TransConv1DNet(upsample_initial_channel // (2**i), upsample_initial_channel // (2 ** (i + 1)), k, stride=u,).weight_norm()
+            for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes))
+        ])
+        self.ups.apply(init_weights)
 
-        self.conv_pre = weight_norm(nn.Conv1d(in_channels, upsample_initial_channel, 7, 1, padding=3))
-
-        self.ups = []
-        for i, (u, k) in enumerate(zip(self.upsample_rates, self.upsample_kernel_sizes)):
-            self.ups.append(weight_norm(nn.ConvTranspose1d(upsample_initial_channel // (2 ** i),
-                                                           upsample_initial_channel // (2 ** (i + 1)),
-                                                           k,
-                                                           u,
-                                                           padding=(k - u) // 2)))
-        self.ups = nn.Sequential(*self.ups)
-
-        self.resblocks = []
+        self.resblocks = nn.ModuleList()
+        ch: int = None
         for i in range(len(self.ups)):
-            resblock_list = []
-
             ch = upsample_initial_channel // (2 ** (i + 1))
-            for j, (k, d) in enumerate(zip(self.resblock_kernel_sizes,
-                                           self.resblock_dilation_sizes)):
-                resblock_list.append(ResidualBlock(ch, k, d))
-            resblock_list = nn.Sequential(*resblock_list)
-            self.resblocks.append(resblock_list)
-        self.resblocks = nn.Sequential(*self.resblocks)
+            self.resblocks.append(ParallelResBlock(ch, resblock_kernel_sizes, resblock_dilation_sizes, activation=activation))
 
-        self.conv_post = weight_norm(nn.Conv1d(ch, 1, 7, 1, padding=3))
+        self.act = activation
+
+        self.conv_post = Conv1DNet(ch, 1, post_conv_kernel_size, stride=1).weight_norm()
 
     def forward(self, x):
         x = self.conv_pre(x)
-
-        for upsample_layer, resblock_group in zip(self.ups, self.resblocks):
-            x = F.leaky_relu(x, 0.1)
-            x = upsample_layer(x)
-            xs = 0
-            for resblock in resblock_group:
-                xs += resblock(x)
-            x = xs / self.num_kernel
-        x = F.leaky_relu(x)
-
-        x = self.conv_post(x)
-        x = torch.tanh(x)
-        return x
+        for i in range(self.num_upsamples):
+            x = self.ups[i](self.act(x,))
+            if self.training: x = checkpoint(self.resblocks[i], x, use_reentrant=False, )
+            else: x = self.resblocks[i](x)
+        return torch.tanh(self.conv_post(self.act(x)))
 
 
 class Denoiser(nn.Module):
-    def __init__(self, hifigan, filter_length=1024, hop_size=256, win_length=1024):
+    def __init__(self, hifigan, filter_length=1024, hop_size=512, win_length=1024):
         super(Denoiser, self).__init__()
         self.filter_length = filter_length
         self.hop_size = hop_size
@@ -216,7 +170,7 @@ class Denoiser(nn.Module):
 
     def compute_bias_spec(self, hifigan):
         with torch.no_grad():
-            mel_input = torch.zeros(1, 80, 100)
+            mel_input = torch.zeros(1, 128, 100)
             bias_audio = hifigan(mel_input).float().squeeze()
             bias_spec = torch.stft(bias_audio, self.filter_length, self.hop_size, self.win_length,
                                    window=self.window, return_complex=True)[:, 0][:, None]
