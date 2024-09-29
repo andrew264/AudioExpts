@@ -4,7 +4,7 @@ from torch import Tensor, nn
 
 
 class LogMelSpectrogram(nn.Module):
-    def __init__(self, sample_rate=44100, n_fft=2048, win_length=2048, hop_length=512, n_mels=128, center=False, f_min=0.0, f_max=None, mode="pow2_sqrt",):
+    def __init__(self, sample_rate=44100, n_fft=2048, win_length=2048, hop_length=512, n_mels=160, center=False, f_min=0.0, f_max=None, mode="pow2_sqrt",):
         super().__init__()
 
         self.sample_rate = sample_rate

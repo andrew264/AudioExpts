@@ -122,11 +122,11 @@ class MultiScaleDiscriminator(nn.Module):
 
 class HiFiGANGenerator(nn.Module):
     def __init__(
-            self, hop_length: int = 512, num_mels: int = 128,
-            upsample_rates: tuple[int] = (8, 8, 2, 2, 2), upsample_kernel_sizes: tuple[int] = (16, 16, 8, 2, 2),
+            self, hop_length: int = 512, num_mels: int = 512,
+            upsample_rates: tuple[int] = (8, 8, 2, 2, 2), upsample_kernel_sizes: tuple[int] = (16, 16, 4, 4, 4),
             resblock_kernel_sizes: tuple[int] = (3, 7, 11), resblock_dilation_sizes: tuple[tuple[int]] = ((1, 3, 5), (1, 3, 5), (1, 3, 5)),
-            upsample_initial_channel: int = 512, pre_conv_kernel_size: int = 7,
-            post_conv_kernel_size: int = 7, activation: Callable[[Tensor], Tensor]=partial(F.silu, inplace=True)):
+            upsample_initial_channel: int = 512, pre_conv_kernel_size: int = 13,
+            post_conv_kernel_size: int = 13, activation: Callable[[Tensor], Tensor]=partial(F.silu, inplace=True)):
         super(HiFiGANGenerator, self).__init__()
 
         assert (prod(upsample_rates)==hop_length), f"hop_length must be {prod(upsample_rates)}"
@@ -134,13 +134,13 @@ class HiFiGANGenerator(nn.Module):
         self.num_upsamples = len(upsample_rates)
         self.num_kernels = len(resblock_kernel_sizes)
 
-        self.ups = nn.ModuleList([
+        self.ups: list[TransConv1DNet] = nn.ModuleList([
             TransConv1DNet(upsample_initial_channel // (2**i), upsample_initial_channel // (2 ** (i + 1)), k, stride=u,).weight_norm()
             for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes))
         ])
         self.ups.apply(init_weights)
 
-        self.resblocks = nn.ModuleList()
+        self.resblocks: list[ParallelResBlock] = nn.ModuleList()
         ch: int = None
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
@@ -157,6 +157,12 @@ class HiFiGANGenerator(nn.Module):
             if self.training: x = checkpoint(self.resblocks[i], x, use_reentrant=False, )
             else: x = self.resblocks[i](x)
         return torch.tanh(self.conv_post(self.act(x)))
+    
+    def remove_parametrizations(self):
+        for up in self.ups: up.remove_weight_norm()
+        for block in self.resblocks: block.remove_parametrizations()
+        self.conv_pre.remove_weight_norm()
+        self.conv_post.remove_weight_norm()
 
 
 class Denoiser(nn.Module):
@@ -202,8 +208,7 @@ class HiFiGAN(L.LightningModule):
         self.lr = 2e-4
         self.automatic_optimization = False
 
-    def forward(self, x):
-        return self.generator(x)
+    def forward(self, x): return self.generator(x)
 
     @staticmethod
     def discriminator_loss(disc_real_outputs, disc_generated_outputs):
@@ -278,15 +283,9 @@ class HiFiGAN(L.LightningModule):
         self.manual_backward(loss_gen_all)
         opt_g.step()
 
-        self.log_dict({
-            'train_loss_g': loss_gen_all,
-            'train_loss_d': loss_disc_all,
-        }, prog_bar=True)
+        self.log_dict({'train_loss_g': loss_gen_all, 'train_loss_d': loss_disc_all}, prog_bar=True)
 
     def configure_optimizers(self):
         opt_g = torch.optim.AdamW(self.generator.parameters(), lr=self.lr, betas=(0.8, 0.9))
-        opt_d = torch.optim.AdamW(
-            list(self.period_discriminator.parameters()) + list(self.scale_discriminator.parameters()),
-            lr=self.lr, betas=(0.8, 0.9)
-        )
+        opt_d = torch.optim.AdamW(list(self.period_discriminator.parameters()) + list(self.scale_discriminator.parameters()), lr=self.lr, betas=(0.8, 0.9))
         return [opt_g, opt_d]
