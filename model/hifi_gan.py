@@ -144,7 +144,7 @@ class HiFiGANGenerator(nn.Module):
         ch: int = None
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
-            self.resblocks.append(ParallelResBlock(ch, resblock_kernel_sizes, resblock_dilation_sizes, activation=activation))
+            self.resblocks.append(ParallelResBlock(ch, resblock_kernel_sizes, resblock_dilation_sizes,))
 
         self.act = activation
 

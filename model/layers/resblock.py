@@ -8,7 +8,7 @@ from torch import Tensor
 from model.layers.conv1d import Conv1DNet, init_weights
 
 class ResBlock1(nn.Module):
-    def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5), activation: Callable[[Tensor], Tensor]=partial(F.silu, inplace=True)):
+    def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5),):
         super(ResBlock1, self).__init__()
         self.convs1: list[Conv1DNet] = nn.ModuleList([
             Conv1DNet(channels, channels, kernel_size, stride=1, dilation=dilation[0]).weight_norm(),
@@ -22,10 +22,12 @@ class ResBlock1(nn.Module):
         ])
         self.convs1.apply(init_weights)
         self.convs2.apply(init_weights)
-        self.act = activation
 
     def forward(self, x: Tensor) -> Tensor:
-        for c1, c2 in zip(self.convs1, self.convs2): x = c2(self.act(c1(self.act(x)))) + x
+        for c1, c2 in zip(self.convs1, self.convs2):
+            xt = c1(F.silu(x))
+            xt = c2(F.silu(xt))
+            x = xt + x
         return x
     
     def remove_parametrizations(self):
@@ -53,11 +55,10 @@ class ResBlock2(nn.Module):
         for c in self.convs: c.remove_weight_norm()
 
 class ParallelResBlock(nn.Module):
-    def __init__(self, channels: int, kernel_sizes: tuple[int] = (3, 7, 11), dilation_sizes: tuple[tuple[int]] = ((1, 3, 5), (1, 3, 5), (1, 3, 5)),
-                 activation: Callable[[Tensor], Tensor]=partial(F.silu, inplace=True)):
+    def __init__(self, channels: int, kernel_sizes: tuple[int] = (3, 7, 11), dilation_sizes: tuple[tuple[int]] = ((1, 3, 5), (1, 3, 5), (1, 3, 5)),):
         super(ParallelResBlock, self).__init__()
         assert len(kernel_sizes) == len(dilation_sizes)
-        self.blocks: list[ResBlock1] = nn.ModuleList([ResBlock1(channels, k, d, activation=activation) for k, d in zip(kernel_sizes, dilation_sizes)])
+        self.blocks: list[ResBlock1] = nn.ModuleList([ResBlock1(channels, k, d,) for k, d in zip(kernel_sizes, dilation_sizes)])
 
     def forward(self, x): return torch.stack([block(x) for block in self.blocks], dim=0).mean(dim=0)
 
