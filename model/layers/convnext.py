@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torchvision.ops import Permute, StochasticDepth
+from torchvision.ops import StochasticDepth
 
 from model.layers.conv1d import Conv1DNet
 
@@ -22,11 +22,11 @@ class LayerNorm(nn.Module):
     
     def forward(self, x: Tensor) -> Tensor:
         if self.data_format == "channels_last": return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        
-        u = x.mean(1, keepdim=True)
-        s = (x - u).pow(2).mean(1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.eps)
-        x = self.weight[:, None] * x + self.bias[:, None]
+        with torch.autocast(x.device.type, enabled=False):
+            u = x.mean(1, keepdim=True)
+            s = (x - u).pow(2).mean(1, keepdim=True)
+            x = (x - u) / torch.sqrt(s + self.eps)
+            x = self.weight[:, None] * x + self.bias[:, None]
         return x
 
 class ConvNeXt1DBlock(nn.Module):
@@ -71,8 +71,7 @@ class ConvNeXt1DEncoder(nn.Module):
         for i in range(len(depths)):
             self.stages.append(nn.Sequential(*[
                 ConvNeXt1DBlock(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value, kernel_size=kernel_size,)
-                for j in range(depths[i])
-                ]))
+                for j in range(depths[i])]))
             cur += depths[i]
 
         self.norm = LayerNorm(dims[-1], eps=1e-6, data_format="channels_first")
@@ -82,7 +81,6 @@ class ConvNeXt1DEncoder(nn.Module):
         if isinstance(m, (nn.Conv1d, nn.Linear)):
             nn.init.trunc_normal_(m.weight, std=0.02)
             nn.init.constant_(m.bias, 0)
-
     def forward(self, x: Tensor) -> Tensor:
         for i in range(len(self.downsample_layers)):
             x = self.downsample_layers[i](x)

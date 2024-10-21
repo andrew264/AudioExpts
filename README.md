@@ -6,6 +6,9 @@ This repository is a collection of experiments with audio. The goal is to learn 
 ### 1. [HiFi-GAN](model/hifi_gan.py)
 This is an implementation of the HiFi-GAN model in PyTorch lightning. Contains code for training it on LibriSpeech dataset.
 
+### 2. [Audio-VQGAN](model/vqgan.py)
+Vector Quantitized Audio Generation, with FSQ and HiFi-GAN. Training kainda doesnt work
+
 There will be more models and experiments added in the future...
 
 ## What is the purpose of this repository?
