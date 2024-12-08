@@ -9,6 +9,9 @@ This is an implementation of the HiFi-GAN model in PyTorch lightning. Contains c
 ### 2. [Audio-VQGAN](model/vqgan.py)
 Vector Quantitized Audio Generation, with FSQ and HiFi-GAN. Training kainda doesnt work
 
+### 3. [audio-codec](model/audio_codec/model.py)
+Vector Quantitized Audio Generation with Group FSQ and HiFi-GAN.
+
 There will be more models and experiments added in the future...
 
 ## What is the purpose of this repository?
