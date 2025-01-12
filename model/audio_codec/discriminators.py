@@ -48,7 +48,7 @@ class PeriodDiscriminator(nn.Module):
         fmap = []
         for conv in self.conv_layers:
             # [batch, filters, (time / period / stride), period]
-            out = conv(inputs=out)
+            out = torch.utils.checkpoint.checkpoint(conv, inputs=out, use_reentrant=False)
             out = self.activation(out)
             fmap.append(out)
         # [batch, 1, (time / period / strides), period]
@@ -120,7 +120,7 @@ class DiscriminatorSTFT(nn.Module):
         out = spec
         for conv in self.conv_layers:
             # [batch, filters, T_spec, fft // strides]
-            out = conv(inputs=out)
+            out = torch.utils.checkpoint.checkpoint(conv, inputs=out, use_reentrant=False)
             out = self.activation(out)
             fmap.append(out)
         # [batch, 1, T_spec, fft // 8]

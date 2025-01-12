@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, List, Tuple, Literal
 import itertools
 
 import lightning as L
@@ -6,6 +6,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 from einops import rearrange
+import yaml
 
 from model.audio_codec.decoder import HiFiGANDecoder
 from model.audio_codec.discriminators import Discriminator, MultiPeriodDiscriminator, MultiResolutionDiscriminatorSTFT
@@ -13,50 +14,82 @@ from model.audio_codec.encoder import HiFiGANEncoder
 from model.audio_codec.loss import DiscriminatorSquaredLoss, FeatureMatchingLoss, GeneratorSquaredLoss, MultiResolutionMelLoss, MultiResolutionSTFTLoss, RelativeFeatureMatchingLoss, TimeDomainLoss, SISDRLoss
 from model.audio_codec.quantizer import GroupFiniteScalarQuantizer
 
-class AudioEncoderConfig:
-    down_sample_rates = (2, 4, 8, 8)
-    encoded_dim = 32
-    base_channels = 48
-    activation = 'lrelu'
+from pydantic import BaseModel, ValidationError
 
-class AudioDecoderConfig:
-    up_sample_rates =(8, 8, 4, 2)
-    input_dim = 32
-    base_channels = 768
-    activation = 'half_snake'
-    output_activation = 'clamp'
+class AudioEncoderConfig(BaseModel):
+    down_sample_rates: List[int] = [2, 4, 8, 8]
+    encoded_dim: int = 32
+    base_channels: int = 48
+    activation: str = 'lrelu'
 
-class VectorQuantitizerConfig:
-    num_groups = 8
-    num_levels_per_group = [8, 5, 5, 5]
+class AudioDecoderConfig(BaseModel):
+    up_sample_rates: List[int] = [8, 8, 4, 2]
+    input_dim: int = 32
+    base_channels: int = 768
+    activation: str = 'half_snake'
+    output_activation: str = 'clamp'
 
-class DiscriminatorConfig:
-    resolutions = [[512, 128, 512], [1024, 256, 1024], [2048, 512, 2048]]
-    stft_bands = [[0.0, 0.1], [0.1, 0.25], [0.25, 0.5], [0.5, 0.75], [0.75, 1.0]]
+class VectorQuantitizerConfig(BaseModel):
+    num_groups: int = 8
+    num_levels_per_group: List[int] = [8, 5, 5, 5]
 
-class AudioCodecConfig:
-    sample_rate = 44100
-    samples_per_frame = 512
-    mel_loss_l1_scale = 10.0
-    mel_loss_l2_scale = 0.0
-    stft_loss_scale = 10.0
-    time_domain_loss_scale = 0.0
-    si_sdr_loss_scale = 0.0
-    commit_loss_scale = 0.0
-    gen_loss_scale = 1.0
-    feature_loss_scale = 1.0
-    disc_updates_per_period = 1
-    disc_update_period = 2
-    loss_resolutions = ((32, 8, 32), (64, 16, 64), (128, 32, 128), (256, 64, 256), (512, 128, 512), (1024, 256, 1024), (2048, 512, 2048))
-    mel_loss_dims = (5, 10, 20, 40, 80, 160, 320)
-    mel_loss_log_guard = 1.0
-    stft_loss_log_guard = 1.0
-    feature_loss_type = 'absolute'
-    audio_encoder = AudioEncoderConfig()
-    audio_decoder = AudioDecoderConfig()
-    vector_quantizer = VectorQuantitizerConfig()
-    discriminator = DiscriminatorConfig()
+class DiscriminatorConfig(BaseModel):
+    resolutions: List[List[int]] = [[512, 128, 512], [1024, 256, 1024], [2048, 512, 2048]]
+    stft_bands: List[List[float]] = [[0.0, 0.1], [0.1, 0.25], [0.25, 0.5], [0.5, 0.75], [0.75, 1.0]]
 
+class AudioCodecConfig(BaseModel):
+    sample_rate: int = 44100
+    samples_per_frame: int = 512
+    mel_loss_l1_scale: float = 10.0
+    mel_loss_l2_scale: float = 0.0
+    stft_loss_scale: float = 10.0
+    time_domain_loss_scale: float = 0.0
+    si_sdr_loss_scale: float = 0.0
+    commit_loss_scale: float = 0.0
+    gen_loss_scale: float = 1.0
+    feature_loss_scale: float = 1.0
+    disc_updates_per_period: int = 1
+    disc_update_period: int = 2
+    loss_resolutions: List[List[int]] = [
+        [32, 8, 32],
+        [64, 16, 64],
+        [128, 32, 128],
+        [256, 64, 256],
+        [512, 128, 512],
+        [1024, 256, 1024],
+        [2048, 512, 2048],
+    ]
+    mel_loss_dims: List[int] = [5, 10, 20, 40, 80, 160, 320]
+    mel_loss_log_guard: float = 1.0
+    stft_loss_log_guard: float = 1.0
+    feature_loss_type: Literal['absolute', 'relative'] = 'absolute'
+    audio_encoder: AudioEncoderConfig = AudioEncoderConfig()
+    audio_decoder: AudioDecoderConfig = AudioDecoderConfig()
+    vector_quantizer: VectorQuantitizerConfig = VectorQuantitizerConfig()
+    discriminator: DiscriminatorConfig = DiscriminatorConfig()
+
+def load_audiocodec_config(filepath: str) -> AudioCodecConfig:
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            config_dict = yaml.safe_load(f)
+            config = AudioCodecConfig(**config_dict)
+            return config
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Config file not found at {filepath}")
+    except ValidationError as e:
+        raise ValidationError(f"Invalid config file format: {e}")
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(f"Error parsing YAML file: {e}")
+
+def load_config(filepath: str) -> AudioCodecConfig:
+    try:
+        return load_audiocodec_config(filepath)
+    except FileNotFoundError:
+        print(f"Config file not found at {filepath}. Creating a default config file.")
+        config = AudioCodecConfig()
+        with open(filepath, 'w', encoding='utf-8') as f:
+            yaml.dump(config.model_dump(), f, indent=4)
+        return config
 
 
 class AudioCodecModel(L.LightningModule):
@@ -328,9 +361,7 @@ class AudioCodecModel(L.LightningModule):
 
         if self.should_update_disc(batch_idx):
             # Train discriminator
-            disc_scores_real, disc_scores_gen, _, _ = self.discriminator(
-                audio_real=audio, audio_gen=audio_gen.detach()
-            )
+            disc_scores_real, disc_scores_gen, _, _ = self.discriminator(audio_real=audio, audio_gen=audio_gen.detach())
             loss_disc = self.disc_loss_fn(disc_scores_real=disc_scores_real, disc_scores_gen=disc_scores_gen)
             metrics["d_loss"] = loss_disc
 
@@ -419,10 +450,10 @@ class AudioCodecModel(L.LightningModule):
         betas = (0.8, 0.99)
         vq_params = self.vector_quantizer.parameters() if self.vector_quantizer else []
         gen_params = itertools.chain(self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params)
-        optim_g = torch.optim.Adam(params=gen_params, lr=lr, betas=betas)
+        optim_g = torch.optim.AdamW(params=gen_params, lr=lr, betas=betas)
 
         disc_params = self.discriminator.parameters()
-        optim_d = torch.optim.Adam(params=disc_params, lr=lr, betas=betas)
+        optim_d = torch.optim.AdamW(params=disc_params, lr=lr, betas=betas)
 
         gamma = 0.998
         scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim_g, gamma=gamma)

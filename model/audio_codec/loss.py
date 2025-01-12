@@ -16,7 +16,7 @@ class MaskedLoss(Loss):
         self.loss_fn = loss_fn
 
     def forward(self, predicted: Tensor, target: Tensor, target_len: Tensor) -> Tensor:
-        assert target.shape[2] == predicted.shape[2]
+        assert target.shape[2] == predicted.shape[2], f"target length {target.shape[2]} and predicted length {predicted.shape[2]} don't match"
 
         # [B, D, T]
         loss = self.loss_fn(input=predicted, target=target)
