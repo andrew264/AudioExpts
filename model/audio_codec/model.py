@@ -67,6 +67,7 @@ class AudioCodecConfig(BaseModel):
     audio_decoder: AudioDecoderConfig = AudioDecoderConfig()
     vector_quantizer: VectorQuantitizerConfig = VectorQuantitizerConfig()
     discriminator: DiscriminatorConfig = DiscriminatorConfig()
+    gradient_accumulation_steps: int = 1
 
 def load_audiocodec_config(filepath: str) -> AudioCodecConfig:
     try:
@@ -180,17 +181,13 @@ class AudioCodecModel(L.LightningModule):
         # Optimizer setup
         self.lr_schedule_interval = None
         self.automatic_optimization = False
+        self.accumulation_steps = cfg.gradient_accumulation_steps
+        self.gen_accumulated_steps = 0
+        self.disc_accumulated_steps = 0
 
     def encode_audio(self, audio: Tensor, audio_len: Optional[Tensor]=None) -> Tuple[Tensor, Tensor]:
         """Apply encoder on the input audio signal. Input will be padded with zeros so
         the last frame has full `self.samples_per_frame` samples.
-
-        Args:
-            audio: input time-domain signal
-            audio_len: valid length for each example in the batch
-
-        Returns:
-            Encoder output `encoded` and its length in number of frames `encoded_len`
         """
         if not audio_len:
             audio_len = torch.tensor([audio.shape[1]] * audio.shape[0]).to(audio.device)
@@ -200,14 +197,6 @@ class AudioCodecModel(L.LightningModule):
 
     def decode_audio(self, inputs: Tensor, input_len: Tensor) -> Tuple[Tensor, Tensor]:
         """Apply decoder on the input. Note that the input is a non-quantized encoder output or a dequantized representation.
-
-        Args:
-            inputs: encoded signal
-            input_len: valid length for each example in the batch
-
-        Returns:
-            Decoded output `audio` in the time domain and its length in number of samples `audio_len`.
-            Note that `audio_len` will be a multiple of `self.samples_per_frame`.
         """
         audio, audio_len = self.audio_decoder(inputs=inputs, input_len=input_len)
         return audio, audio_len
@@ -215,13 +204,6 @@ class AudioCodecModel(L.LightningModule):
     def quantize(self, encoded: Tensor, encoded_len: Tensor) -> Tensor:
         """Quantize the continuous encoded representation into a discrete
         representation for each frame.
-
-        Args:
-            encoded: encoded signal representation
-            encoded_len: valid length of the encoded representation in frames
-
-        Returns:
-            A tensor of tokens for each codebook for each frame.
         """
         # vector quantizer is returning [C, B, T], where C is the number of codebooks
         tokens = self.vector_quantizer.encode(inputs=encoded, input_len=encoded_len)
@@ -231,13 +213,6 @@ class AudioCodecModel(L.LightningModule):
 
     def dequantize(self, tokens: Tensor, tokens_len: Tensor) -> Tensor:
         """Convert the discrete tokens into a continuous encoded representation.
-
-        Args:
-            tokens: discrete tokens for each codebook for each time frame
-            tokens_len: valid length of each example in the batch
-
-        Returns:
-            Continuous encoded representation of the discrete input representation.
         """
         # vector quantizer is using [C, B, T], where C is the number of codebooks
         tokens = rearrange(tokens, 'B C T -> C B T')
@@ -246,14 +221,6 @@ class AudioCodecModel(L.LightningModule):
 
     def encode(self, audio: Tensor, audio_len: Optional[Tensor]=None) -> Tuple[Tensor, Tensor]:
         """Convert input time-domain audio signal into a discrete representation (tokens).
-
-        Args:
-            audio: input time-domain signal, shape `(batch, number of samples)`
-            audio_len: valid length for each example in the batch, shape `(batch size,)`
-
-        Returns:
-            Tokens for each codebook for each frame, shape `(batch, number of codebooks, number of frames)`,
-            and the corresponding valid lengths, shape `(batch,)`
         """
         # Apply encoder to obtain a continuous vector for each frame
         encoded, encoded_len = self.encode_audio(audio=audio, audio_len=audio_len)
@@ -263,14 +230,6 @@ class AudioCodecModel(L.LightningModule):
 
     def decode(self, tokens: Tensor, tokens_len: Optional[Tensor]=None) -> Tuple[Tensor, Tensor]:
         """Convert discrete tokens into a continuous time-domain signal.
-
-        Args:
-            tokens: discrete tokens for each codebook for each time frame, shape `(batch, number of codebooks, number of frames)`
-            tokens_len: valid lengths, shape `(batch,)`
-
-        Returns:
-            Decoded output `audio` in the time domain and its length in number of samples `audio_len`.
-            Note that `audio_len` will be a multiple of `self.samples_per_frame`.
         """
         if not tokens_len:
             tokens_len = torch.tensor([tokens.shape[-1]] * tokens.shape[0]).to(tokens.device)
@@ -283,13 +242,6 @@ class AudioCodecModel(L.LightningModule):
 
     def forward(self, audio: Tensor, audio_len: Optional[Tensor]=None) -> Tuple[Tensor, Tensor]:
         """Apply encoder, quantizer, decoder on the input time-domain signal.
-
-        Args:
-            audio: input time-domain signal
-            audio_len: valid length for each example in the batch
-
-        Returns:
-            Reconstructed time-domain signal `output_audio` and its length in number of samples `output_audio_len`.
         """
         encoded, encoded_len = self.encode_audio(audio=audio, audio_len=audio_len)
 
@@ -305,13 +257,6 @@ class AudioCodecModel(L.LightningModule):
         """Zero pad the end of the audio so that we do not have a partial end frame.
         The output will be zero-padded to have an integer number of frames of
         length `self.samples_per_frame`.
-
-        Args:
-            audio: input time-domain signal
-            audio_len: valid length for each example in the batch
-
-        Returns:
-            Padded time-domain signal `padded_audio` and its length `padded_len`.
         """
         padded_len = self.samples_per_frame * torch.ceil(audio_len / self.samples_per_frame).int()
         max_len = padded_len.max().item()
@@ -324,7 +269,7 @@ class AudioCodecModel(L.LightningModule):
         audio = batch.get("audio")
         # [B]
         audio_len = batch.get("audio_lens")
-        audio, audio_len = self.pad_audio(audio, audio_len)
+        # audio, audio_len = self.pad_audio(audio, audio_len)
 
         # [B, D, T_encoded]
         encoded, encoded_len = self.audio_encoder(audio=audio, audio_len=audio_len)
@@ -365,9 +310,14 @@ class AudioCodecModel(L.LightningModule):
             loss_disc = self.disc_loss_fn(disc_scores_real=disc_scores_real, disc_scores_gen=disc_scores_gen)
             metrics["d_loss"] = loss_disc
 
-            optim_disc.zero_grad()
             self.manual_backward(loss_disc)
-            optim_disc.step()
+            self.disc_accumulated_steps += 1
+
+            # Update discriminator if accumulated steps reached
+            if self.disc_accumulated_steps % self.accumulation_steps == 0:
+                self.clip_gradients(optim_disc, gradient_clip_val=1.)
+                optim_disc.step()
+                optim_disc.zero_grad()
 
         generator_losses = []
 
@@ -412,14 +362,19 @@ class AudioCodecModel(L.LightningModule):
 
         loss_gen_all = sum(generator_losses)
 
-        optim_gen.zero_grad()
         self.manual_backward(loss_gen_all)
-        optim_gen.step()
+        self.gen_accumulated_steps += 1
+
+        # Update generator if accumulated steps reached
+        if self.gen_accumulated_steps % self.accumulation_steps == 0:
+            self.clip_gradients(optim_gen, gradient_clip_val=1.)
+            optim_gen.step()
+            optim_gen.zero_grad()
 
         self.update_lr()
 
         self.log_dict(metrics, on_step=True, sync_dist=True)
-        self.log("t_loss", loss_mel_l1, prog_bar=True, logger=False, sync_dist=True)
+        self.log("t_loss", loss_gen_all, prog_bar=True, logger=False, sync_dist=True)
 
     def on_train_epoch_end(self):
         self.update_lr("epoch")
@@ -446,7 +401,7 @@ class AudioCodecModel(L.LightningModule):
         self.log_dict(metrics, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
-        lr = 0.0002
+        lr = 1e-5
         betas = (0.8, 0.99)
         vq_params = self.vector_quantizer.parameters() if self.vector_quantizer else []
         gen_params = itertools.chain(self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params)
